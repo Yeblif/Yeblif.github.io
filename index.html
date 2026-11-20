@@ -58,6 +58,7 @@
   <div class="controls">
     <input type="search" id="q" placeholder="Search…" aria-label="Search">
     <div id="chips"></div>
+    <button id="refresh" class="chip" type="button" title="Fetch the latest list from GitHub">↻ Refresh</button>
   </div>
 
   <div id="status" class="status">Loading…</div>
@@ -72,8 +73,8 @@
 <script>
 const USER = "Yeblif";
 const SELF = (USER + ".github.io").toLowerCase();
-const CACHE_KEY = "pages-index-v1";
-const CACHE_MS = 60 * 60 * 1000; // 1 hour — keeps well inside the API's 60 requests/hour limit
+const CACHE_KEY = "pages-index-v2";
+const CACHE_MS = 5 * 60 * 1000; // 5 min — one API call per load, well inside the 60 requests/hour limit
 const TOPIC_ORDER = ["work", "c3d", "homelab", "fusion"];
 
 let repos = [];
@@ -90,8 +91,8 @@ function cacheSet(data) {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), data })); } catch (e) {}
 }
 
-async function load() {
-  const cached = cacheGet();
+async function load(force = false) {
+  const cached = force ? null : cacheGet();
   if (cached) return cached;
   let all = [], page = 1;
   while (true) {
@@ -173,13 +174,24 @@ function render() {
 
 document.getElementById("q").addEventListener("input", render);
 
-load().then(data => {
-  repos = data.sort((a, b) => a.name.localeCompare(b.name));
-  renderChips();
-  render();
-}).catch(err => {
-  document.getElementById("status").textContent = err.message;
-});
+function start(force) {
+  const btn = document.getElementById("refresh");
+  btn.disabled = true;
+  if (force) { try { localStorage.removeItem(CACHE_KEY); } catch (e) {} }
+  return load(force).then(data => {
+    repos = data.sort((a, b) => a.name.localeCompare(b.name));
+    if (activeTopic !== "all" && !repos.some(r => r.topics.includes(activeTopic))) activeTopic = "all";
+    renderChips();
+    render();
+  }).catch(err => {
+    const status = document.getElementById("status");
+    status.style.display = "block";
+    status.textContent = err.message;
+  }).finally(() => { btn.disabled = false; });
+}
+
+document.getElementById("refresh").addEventListener("click", () => start(true));
+start(false);
 </script>
 </body>
 </html>
