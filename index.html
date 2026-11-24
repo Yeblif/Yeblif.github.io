@@ -58,14 +58,15 @@
   <div class="controls">
     <input type="search" id="q" placeholder="Search…" aria-label="Search">
     <div id="chips"></div>
-    <button id="refresh" class="chip" type="button" title="Fetch the latest list from GitHub">↻ Refresh</button>
+    <button id="refresh" class="chip" type="button" title="Check GitHub live for the latest list">↻ Refresh</button>
   </div>
 
+  <div id="note" class="status" style="display:none;padding:0 0 12px"></div>
   <div id="status" class="status">Loading…</div>
   <div id="grid" class="grid"></div>
 
   <footer>
-    Built from the GitHub API. Any public repo with Pages switched on appears here.
+    Updated daily from the GitHub API (↻ Refresh checks live). Any public repo with Pages switched on appears here.
     · <a href="https://github.com/Yeblif">github.com/Yeblif</a>
   </footer>
 </main>
@@ -73,38 +74,40 @@
 <script>
 const USER = "Yeblif";
 const SELF = (USER + ".github.io").toLowerCase();
-const CACHE_KEY = "pages-index-v2";
-const CACHE_MS = 5 * 60 * 1000; // 5 min — one API call per load, well inside the 60 requests/hour limit
+const CACHE_KEY = "pages-index-v3";
 const TOPIC_ORDER = ["work", "c3d", "homelab", "fusion"];
 
 let repos = [];
 let activeTopic = "all";
 
+// Last good list, kept as a fallback if a fetch fails.
 function cacheGet() {
-  try {
-    const c = JSON.parse(localStorage.getItem(CACHE_KEY));
-    if (c && Date.now() - c.t < CACHE_MS) return c.data;
-  } catch (e) {}
-  return null;
+  try { return JSON.parse(localStorage.getItem(CACHE_KEY)); } catch (e) { return null; }
 }
 function cacheSet(data) {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), data })); } catch (e) {}
 }
 
-async function load(force = false) {
-  const cached = force ? null : cacheGet();
-  if (cached) return cached;
+// Normal load: repos.json, rebuilt daily (or on demand) by a GitHub Action. No API rate limit.
+async function loadJson() {
+  const res = await fetch(`repos.json?t=${Date.now()}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`repos.json ${res.status}`);
+  return res.json();
+}
+
+// Refresh button: ask the GitHub API directly for the very latest list.
+async function loadApi() {
   let all = [], page = 1;
   while (true) {
     const res = await fetch(`https://api.github.com/users/${USER}/repos?per_page=100&page=${page}&sort=pushed`,
       { headers: { Accept: "application/vnd.github+json" } });
-    if (!res.ok) throw new Error(res.status === 403 ? "GitHub API rate limit hit. Try again in a bit." : `GitHub API error ${res.status}`);
+    if (!res.ok) throw new Error(res.status === 403 || res.status === 429 ? "rate limit" : `API ${res.status}`);
     const batch = await res.json();
     all = all.concat(batch);
     if (batch.length < 100) break;
     page++;
   }
-  const data = all
+  return all
     .filter(r => r.has_pages && !r.fork && r.name.toLowerCase() !== SELF)
     .map(r => ({
       name: r.name,
@@ -114,8 +117,27 @@ async function load(force = false) {
       site: r.homepage && /github\.io/i.test(r.homepage) ? r.homepage : `https://${USER.toLowerCase()}.github.io/${r.name}/`,
       pushed: r.pushed_at
     }));
-  cacheSet(data);
-  return data;
+}
+
+// Returns { data, note }. Never wipes a good list because of a failed fetch.
+async function load(live) {
+  if (live) {
+    try { const data = await loadApi(); cacheSet(data); return { data, note: "" }; }
+    catch (e) {
+      const note = e.message === "rate limit"
+        ? "GitHub's live API is rate-limited on this network right now, so this is the list from the last daily update."
+        : "Couldn't reach the GitHub API, so this is the list from the last daily update.";
+      try { const data = await loadJson(); cacheSet(data); return { data, note }; } catch (e2) {}
+      const c = cacheGet(); if (c) return { data: c.data, note };
+      throw e;
+    }
+  }
+  try { const data = await loadJson(); cacheSet(data); return { data, note: "" }; }
+  catch (e) {
+    const c = cacheGet(); if (c) return { data: c.data, note: "Showing a saved copy of the list." };
+    try { const data = await loadApi(); cacheSet(data); return { data, note: "" }; }
+    catch (e2) { throw new Error("Couldn't load the list right now. Try again in a bit."); }
+  }
 }
 
 function prettyName(n) {
@@ -174,15 +196,16 @@ function render() {
 
 document.getElementById("q").addEventListener("input", render);
 
-function start(force) {
+function start(live) {
   const btn = document.getElementById("refresh");
   btn.disabled = true;
-  if (force) { try { localStorage.removeItem(CACHE_KEY); } catch (e) {} }
-  return load(force).then(data => {
-    repos = data.sort((a, b) => a.name.localeCompare(b.name));
+  return load(live).then(({ data, note }) => {
+    repos = data.slice().sort((a, b) => a.name.localeCompare(b.name));
     if (activeTopic !== "all" && !repos.some(r => r.topics.includes(activeTopic))) activeTopic = "all";
     renderChips();
     render();
+    const n = document.getElementById("note");
+    n.textContent = note; n.style.display = note ? "block" : "none";
   }).catch(err => {
     const status = document.getElementById("status");
     status.style.display = "block";
