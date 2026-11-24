@@ -1,0 +1,65 @@
+name: Update repo list
+
+# Builds repos.json from the GitHub API using the workflow token and
+# deploys the site with it, so visitors' browsers never call the API
+# (no 60/hour per-IP limit).
+#
+# Needs Settings → Pages → Source set to "GitHub Actions". Commits pushed
+# with GITHUB_TOKEN don't trigger a branch-based Pages build, so this
+# deploys directly instead of committing repos.json.
+on:
+  schedule:
+    - cron: "23 5 * * *"   # daily, ~05:23 UTC
+  workflow_dispatch:        # Actions tab → "Run workflow" to update the list now
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build repos.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          owner="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          gh api --paginate "users/${OWNER}/repos?per_page=100&type=owner" \
+            | jq -s --arg self "${owner}.github.io" --arg owner "$owner" '
+                add
+                | map(select(.has_pages and (.fork | not) and (.private | not) and ((.name | ascii_downcase) != $self)))
+                | map({
+                    name,
+                    desc: (.description // ""),
+                    topics: (.topics // []),
+                    repo: .html_url,
+                    site: (if ((.homepage // "") | test("github\\.io"; "i")) then .homepage
+                           else "https://\($owner).github.io/\(.name)/" end),
+                    pushed: .pushed_at
+                  })
+                | sort_by(.name | ascii_downcase)' > repos.json
+          jq -e 'type == "array"' repos.json > /dev/null
+          echo "$(jq length repos.json) Pages sites listed"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
